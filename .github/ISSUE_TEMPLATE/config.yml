@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Multi-dial questions
+    url: https://github.com/OWNER/esurfingdialer-go/blob/main/docs/multi-dial.md
+    about: Router multi-dial, mwan3, macvlan and policy routing are covered here first.
+  - name: Security report
+    url: https://github.com/OWNER/esurfingdialer-go/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.

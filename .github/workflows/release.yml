@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish, for example v1.2.3'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build all targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: resolve version
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: test before publishing
+        run: go test -count=1 ./...
+
+      - name: build every target
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          chmod +x scripts/build-release.sh
+          ./scripts/build-release.sh
+
+      - name: assemble bundle
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -eu
+          stage="esurfingdialer-${VERSION}"
+          rm -rf pkg
+          mkdir -p "pkg/$stage/bin"
+          cp -r deploy  "pkg/$stage/deploy"
+          cp -r docs    "pkg/$stage/docs"
+          cp -r scripts "pkg/$stage/scripts"
+          cp README.md LICENSE CHANGELOG.md "pkg/$stage/"
+          cp dist/esurfingdialer-* "pkg/$stage/bin/"
+          ( cd "pkg/$stage" && find . -type f | sort | xargs sha256sum > SHA256SUMS )
+          ( cd pkg && tar -czf "../dist/$stage.tar.gz" "$stage" )
+          ( cd pkg && zip -qr "../dist/$stage.zip" "$stage" )
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: resolve version
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -eu
+
+          # Prefer the CHANGELOG section for this version; fall back to notes
+          # generated from the commit range.
+          if grep -q "^## \\[${VERSION#v}\\]" CHANGELOG.md 2>/dev/null; then
+            awk -v v="${VERSION#v}" '
+              index($0, "## [" v "]") == 1 {flag=1; next}
+              flag && index($0, "## [") == 1 {exit}
+              flag {print}
+            ' CHANGELOG.md > RELEASE_NOTES.md
+            notes=(--notes-file RELEASE_NOTES.md)
+          else
+            notes=(--generate-notes)
+          fi
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/* --clobber
+            gh release edit "$VERSION" --title "esurfingdialer $VERSION" "${notes[@]}"
+          else
+            gh release create "$VERSION" \
+              --title "esurfingdialer $VERSION" \
+              --verify-tag \
+              "${notes[@]}" \
+              dist/*
+          fi

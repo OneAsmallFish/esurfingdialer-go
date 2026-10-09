@@ -1,0 +1,19 @@
+{
+  "user": "REPLACE_WITH_YOUR_ACCOUNT",
+  "password": "REPLACE_WITH_YOUR_PASSWORD",
+  "sms_code": "",
+  "log_level": "info",
+
+  "bind_interface": "lan1",
+  "bind_source_ip": "",
+  "bind_fwmark": "0x200",
+
+  "portal_url": "",
+  "portal_auto_login": false,
+  "portal_user": "",
+  "portal_password": "",
+  "portal_mac": "",
+
+  "user_agent": "CCTP/android64_vpn/2093",
+  "legacy_user_agent": "CCTP/android64_vpn/2089"
+}

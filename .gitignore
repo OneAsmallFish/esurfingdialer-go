@@ -1,0 +1,20 @@
+# build output (repo root only -- do not match deploy scripts by name)
+/esurfingdialer
+/esurfingdialer-*
+/bin/
+/dist/
+*.exe
+
+# cipher cross-check writes its ENC dump next to the input fixtures
+review/cross-validation/go-crypto.out
+go-crypto.out
+
+# real credentials -- only *.json.example belongs in the repo
+*.local.json
+
+# editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

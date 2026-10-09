@@ -1,0 +1,48 @@
+#!/bin/sh
+# Keep one "from <wan-ip> lookup <table>" rule per physical uplink.
+#
+# When a DHCP lease renews, the previous source-address rule points at an
+# address the router no longer owns and unmarked traffic silently falls back to
+# the main table. This hotplug script re-installs the rule and is idempotent.
+#
+# Configure the mapping in /etc/config/esurfingdialer:
+#
+#   config source_rule 'wan'
+#       option device 'eth1'
+#       option table '1'
+#       option priority '801'
+
+[ -n "$ACTION" ] || exit 0
+[ -n "$INTERFACE" ] || exit 0
+
+case "$ACTION" in
+	ifup|ifupdate) ;;
+	*) exit 0 ;;
+esac
+
+config_load esurfingdialer 2>/dev/null || exit 0
+
+install_rule() {
+	local section="$1" device table priority ipaddr
+
+	config_get device "$section" 'device' ''
+	config_get table "$section" 'table' ''
+	config_get priority "$section" 'priority' ''
+
+	[ -n "$device" ] && [ -n "$table" ] && [ -n "$priority" ] || return 0
+
+	ipaddr="$(ip -4 -o addr show dev "$device" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)"
+	[ -n "$ipaddr" ] || return 0
+
+	if ip rule show | grep -Eq "^$priority:.*from $ipaddr lookup $table$"; then
+		return 0
+	fi
+
+	ip rule del priority "$priority" 2>/dev/null
+	if ip rule add priority "$priority" from "$ipaddr"/32 lookup "$table"; then
+		logger -t esurfingdialer-srcrule "$device source rule ready: $ipaddr table $table priority $priority"
+	fi
+}
+
+config_foreach install_rule source_rule
+exit 0

@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+# Shell scripts must keep LF so they stay executable on OpenWrt.
+*.sh            text eol=lf
+*.init          text eol=lf
+*.hotplug       text eol=lf
+deploy/**       text eol=lf
+
+# Keep Windows entry points CRLF-free too; they are only build inputs.
+*.go            text eol=lf
+*.yml           text eol=lf
+
+*.png           binary
+*.jpg           binary
+*.gz            binary
+*.zip           binary

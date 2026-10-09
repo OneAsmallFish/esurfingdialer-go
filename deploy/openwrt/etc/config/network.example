@@ -1,0 +1,38 @@
+# /etc/config/network -- excerpt showing what each multi-dial session needs
+#
+# The section name MUST equal the esurfing-multidial session name. netifd owns
+# the DHCP client and installs the default route into ip4table, so the dialer
+# never has to guess a gateway.
+
+config interface 'wan'
+	option device 'eth1'
+	option proto 'dhcp'
+	option ip4table '1'
+	option defaultroute '1'
+	option peerdns '0'
+
+config interface 'wan2'
+	option device 'lan1'
+	option proto 'dhcp'
+	option ip4table '2'
+	option defaultroute '1'
+	option peerdns '0'
+
+config interface 'vwan1'
+	option device 'mvw1'
+	option proto 'dhcp'
+	option ip4table '3'
+	option defaultroute '1'
+	option peerdns '0'
+	# Persisted lease hint written by esurfing-macvlan-multidial. The DHCP
+	# server stays authoritative; asking for the same address again just keeps
+	# the MAC/IP pair stable so the portal does not see a brand new session.
+	option ipaddr ''
+
+config interface 'vwan2'
+	option device 'mvlw1'
+	option proto 'dhcp'
+	option ip4table '4'
+	option defaultroute '1'
+	option peerdns '0'
+	option ipaddr ''

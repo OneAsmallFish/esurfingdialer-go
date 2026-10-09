@@ -1,0 +1,32 @@
+# /etc/config/esurfingdialer
+#
+# One "instance" section per dialer process. Add as many as you have upstreams.
+
+config instance 'wan'
+	option enabled '1'
+	option config_file '/etc/esurfingdialer/wan.json'
+	option interface 'wan'
+	option bind_interface 'eth1'
+	option bind_fwmark '0x100'
+	option bind_source_ip ''
+	option log_level 'info'
+
+config instance 'wan2'
+	option enabled '1'
+	option config_file '/etc/esurfingdialer/wan2.json'
+	option interface 'wan2'
+	option bind_interface 'lan1'
+	option bind_fwmark '0x200'
+	option bind_source_ip ''
+	option log_level 'info'
+
+# Optional: keep the unmarked-traffic source rule pinned to the current lease.
+config source_rule 'wan'
+	option device 'eth1'
+	option table '1'
+	option priority '801'
+
+config source_rule 'wan2'
+	option device 'lan1'
+	option table '2'
+	option priority '802'

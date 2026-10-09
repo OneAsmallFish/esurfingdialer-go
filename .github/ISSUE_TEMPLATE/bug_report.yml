@@ -1,0 +1,69 @@
+name: Bug report
+description: Something is not working as documented
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste credentials, real account names, campus IP addresses,
+        MAC addresses or raw packet captures.** Redact URLs in logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `esurfingdialer --version`, or the commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Target platform
+      options:
+        - linux/arm64
+        - linux/mipsle (softfloat)
+        - linux/mips (softfloat)
+        - linux/arm (GOARM=7)
+        - linux/amd64
+        - windows/amd64
+        - darwin/arm64
+        - other (describe below)
+    validations:
+      required: true
+  - type: input
+    id: router
+    attributes:
+      label: Router and firmware
+      description: Model plus OpenWrt version, if applicable.
+      placeholder: e.g. generic ARM64 board, OpenWrt 24.10
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Symptom, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (redacted)
+      description: Run with `--log-level debug`. Replace URLs with `<url>`.
+      render: text
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have redacted credentials, account names, internal addresses and MACs.
+          required: true
+        - label: This is not a request to bypass accounting or impersonate another user.
+          required: true

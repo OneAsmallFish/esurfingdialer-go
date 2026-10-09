@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    # Tag pushes are handled by release.yml; branches only here.
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -s -l ./cmd ./internal)
+          if [ -n "$out" ]; then
+            echo "::error::the following files need gofmt -s:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race)
+        run: go test -race -count=1 ./...
+
+  cross-compile:
+    name: cross-compile ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.suffix }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, envs: '',                  suffix: '' }
+          - { goos: linux,   goarch: arm64, envs: '',                  suffix: '' }
+          - { goos: linux,   goarch: arm,   envs: 'GOARM=7',           suffix: 'v7' }
+          - { goos: linux,   goarch: 386,   envs: '',                  suffix: '' }
+          - { goos: linux,   goarch: mipsle, envs: 'GOMIPS=softfloat', suffix: 'sf' }
+          - { goos: linux,   goarch: mips,  envs: 'GOMIPS=softfloat',  suffix: 'sf' }
+          - { goos: freebsd, goarch: amd64, envs: '',                  suffix: '' }
+          - { goos: windows, goarch: amd64, envs: '',                  suffix: '' }
+          - { goos: darwin,  goarch: arm64, envs: '',                  suffix: '' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          # shellcheck disable=SC2086
+          env ${{ matrix.envs }} go build -trimpath -ldflags "-s -w" -o /tmp/out ./cmd/esurfingdialer
+          ls -l /tmp/out
+
+  shellcheck:
+    name: shellcheck deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: |
+          # Only genuine errors fail the build; OpenWrt's /etc/rc.common
+          # sourcing and busybox-isms produce informational noise otherwise.
+          find deploy scripts -type f \
+            \( -name '*.sh' -o -path '*init.d*' -o -path '*hotplug.d*' -o -path '*libexec*' -o -path '*usr/bin*' \) \
+            -print0 | xargs -0 shellcheck --severity=error --shell=sh

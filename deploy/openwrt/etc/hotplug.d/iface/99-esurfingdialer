@@ -1,0 +1,31 @@
+#!/bin/sh
+# Optional belt-and-braces companion to the procd interface triggers in
+# /etc/init.d/esurfingdialer.
+#
+# A DHCP renewal can change the captive wlanuserip the dialer must authenticate
+# with. procd already reloads the service on interface changes when
+# "option interface" is set; this script covers firmwares where that trigger
+# fires before the new lease is installed.
+#
+# Trade-off: reloading the service restarts every instance, not just the one
+# bound to $INTERFACE. That is fine for two or three uplinks. Delete this file
+# if you would rather control restarts yourself.
+
+[ -n "$ACTION" ] || exit 0
+[ -n "$INTERFACE" ] || exit 0
+
+case "$ACTION" in
+	ifup|ifupdate) ;;
+	*) exit 0 ;;
+esac
+
+matched=0
+for section in $(uci -q get esurfingdialer 2>/dev/null); do
+	[ "$(uci -q get "esurfingdialer.$section.interface")" = "$INTERFACE" ] || continue
+	[ "$(uci -q get "esurfingdialer.$section.enabled")" = "0" ] && continue
+	matched=1
+	logger -t esurfingdialer-hotplug "$INTERFACE $ACTION -> instance $section, reloading service"
+done
+
+[ "$matched" -eq 1 ] || exit 0
+/etc/init.d/esurfingdialer reload

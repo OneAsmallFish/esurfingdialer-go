@@ -1,0 +1,27 @@
+# /etc/config/esurfing-multidial
+#
+# One "session" section per virtual MAC you want to authenticate.
+# The section name must match the netifd interface name in
+# /etc/config/network that owns the DHCP client and the routing table.
+
+config session 'vwan1'
+	option enabled '1'
+	option parent 'eth1'            # physical uplink the macvlan rides on
+	option device 'mvw1'            # macvlan link name
+	option mac '02:00:00:00:01:01'  # locally administered, must be unique
+	option table '3'                # ip4table used by the network interface
+	option fwmark '0x300'           # SO_MARK the dialer stamps on its sockets
+	option priority '803'           # ip rule priority for the source rule
+	option base_config '/etc/esurfingdialer/wan.json'
+	option portal_mac ''            # only if the portal form needs usermac
+
+config session 'vwan2'
+	option enabled '1'
+	option parent 'lan1'
+	option device 'mvlw1'
+	option mac '02:00:00:00:01:02'
+	option table '4'
+	option fwmark '0x400'
+	option priority '804'
+	option base_config '/etc/esurfingdialer/wan2.json'
+	option portal_mac ''
