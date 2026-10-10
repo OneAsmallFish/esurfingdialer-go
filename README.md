@@ -4,6 +4,8 @@
 
 先跑通一条线路，再看[多拨教程](docs/multi-dial.md)。多拨是否可用取决于学校和账号的接入限制，程序不能保证增加会话后带宽就会叠加。
 
+也可以参考同学部署后整理的[红米 AC2100 双网口、双账号案例](docs/ac2100-dual-wan.md)。它按“先接管第二条线，再迁移第一条线，最后切换均衡”的顺序介绍操作。Windows 电脑直接接入校园网则看 [Windows 使用说明](docs/windows.md)。
+
 ## 下载
 
 在 [Releases](https://github.com/OneAsmallFish/esurfingdialer-go/releases/latest) 下载与你的系统、CPU 架构匹配的文件。路由器上可以先运行 `uname -m` 查看架构。
@@ -15,6 +17,7 @@
 | ARMv7 | `linux-armv7` |
 | 小端 MIPS，如部分 MT7621 设备 | `linux-mipslesf` |
 | 大端 MIPS | `linux-mipssf` |
+| Windows x64 电脑 | `windows-amd64.exe` |
 
 MIPS 文件使用软浮点构建。请同时核对固件架构，不要只凭路由器型号选择文件。下载后可用 Release 中的 `SHA256SUMS` 校验。
 
@@ -85,6 +88,23 @@ MIPS 文件使用软浮点构建。请同时核对固件架构，不要只凭路
 不要仅因为网络慢就打开 `portal_auto_login`。先确认是否被重定向到校园门户，再填写对应参数。当前没有 `portal_host` 配置项。
 
 配置文件、环境变量、命令行参数都可使用，优先级是命令行 > 环境变量 > 配置文件。参数列表可运行 `esurfingdialer -h` 查看。多出口绑定功能仅在 Linux 上实现。
+
+## 占用与性能
+
+程序是单个二进制，不需要 Java 或额外运行环境。v1.0.1 的 Linux 发布文件约 **6.0–6.9 MiB**，这是文件体积，不是运行内存。
+
+它只负责认证和保活，不代理转发你的下载流量。登录稳定后按服务端要求发送保活；双拨通常运行两个实例，要分别计算占用。实际 CPU、常驻内存会受架构、认证算法、断线重试和日志级别影响。目前没有统一的路由器实测基准，请以自己设备上的观测为准。
+
+在 OpenWrt 上可用 `top` 观察 CPU，再查看每个进程的常驻内存（`VmRSS`，单位 kB）：
+
+```sh
+for pid in $(pidof esurfingdialer); do
+    echo "PID=$pid"
+    grep '^VmRSS:' "/proc/$pid/status"
+done
+```
+
+比较时请分别观察稳定在线和重连阶段。下载测速时路由器整体 CPU 很高，未必是拨号器占用；还要区分转发、Wi-Fi、防火墙和 mwan3 的开销。Windows 的查看方式见[使用说明](docs/windows.md#常见问题)。
 
 ## 自己编译
 

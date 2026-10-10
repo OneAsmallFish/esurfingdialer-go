@@ -52,7 +52,7 @@ jobs:
           stage="esurfingdialer-${VERSION}"
           mkdir -p "pkg/$stage/bin" "pkg/$stage/docs" "pkg/$stage/examples"
           cp README.md LICENSE "pkg/$stage/"
-          cp docs/multi-dial.md "pkg/$stage/docs/"
+          cp docs/*.md "pkg/$stage/docs/"
           cp examples/config.json.example "pkg/$stage/examples/"
           cp dist/esurfingdialer-* "pkg/$stage/bin/"
           (cd "pkg/$stage" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS)
