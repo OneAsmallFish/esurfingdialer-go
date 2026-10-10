@@ -1,809 +1,278 @@
-# 路由器多拨完全指南
+# OpenWrt 多拨教程
 
-> 本文以我们自己在用的一台 OpenWrt 路由器为例，所有地址、MAC、账号均已替换为示例值。
-> 把它当成一份“照着做就能通”的工程记录，而不是营销文案。
->
-> 阅读前提：你已经能用 `esurfingdialer` 在路由器上完成 **单拨**。如果还没有，
-> 先跳到 [第 4 章](#4-第一步让单拨先稳定跑起来)。
+先按 [README](../README.md) 跑通单拨。下面分别介绍两根网线的双拨和一根网线的 macvlan 双拨，不要同时照着两套配置操作。
 
----
+所有地址、MAC、设备名和账号都只是示例，需要换成自己的。我们的双物理线方案曾在现场完成认证和出网验证；单线方案在不同固件、不同接入点上需要重新验证。不要把这些例子当成适用于所有学校的安装脚本。
 
-## 0. 先说结论
+## 1. 动手前
 
-| 方案 | 隔离性 | 复杂度 | 稳定性 | 我们的选择 |
-|---|---|---|---|---|
-| **A. 多物理口多拨** | 天然（每个口一条线） | ★☆☆☆☆ | ★★★★★ | ✅ 生产在用 |
-| **B. macvlan 单线多拨** | 中（共享物理口） | ★★★☆☆ | ★★★★☆ | ✅ 单线场景首选 |
-| **C. netns + veth 隔离** | 强 | ★★★★★ | ★★★☆☆ | ❌ 已放弃 |
+- 确认学校允许使用路由器、账号允许相应的并发登录。多拨不会绕过这些限制。
+- 用网线连路由器 LAN，在本地操作。修改 WAN、桥接或防火墙可能中断远程连接。
+- 备份配置，并记下当前哪个口是 LAN、哪个口是 WAN。
+- 一次只加一路。新线路认证成功以后，还要检查新旧线路是否都能上网。
 
-以及一条比架构更重要的结论：
-
-> **能认证成功 ≠ 能稳定转发。**
-> 我们在实测中见过：第三个身份顺利拿到 ZSM、ticket、KEEP，然后 **两条物理线路先后
-> 被上游黑洞**，全程没有任何错误码。多拨的瓶颈通常不在你的路由器，而在上游的并发策略。
-> 所以本文后半部分的重点是 **怎么观测、怎么回滚**，不是怎么把会话数堆到最大。
-
----
-
-## 1. 多拨到底是什么
-
-### 1.1 校园网认证模型
-
-先理解一件事：CCTP 认证里，**身份不只是账号**。一次登录请求里带了这些东西：
-
-```text
-user-agent, client-id, ticket, local-time, userid, passwd, verify
-```
-
-而在此之前，取 ticket 的请求里带了：
-
-```text
-client-id, local-time, host-name, ipv4, mac, ostag, gwip
-```
-
-其中 `ipv4`、`mac`、`gwip` 来自你当前的 DHCP 租约和接口。也就是说：
-
-**上游看到的“一个在线用户” = 账号 + Client-ID + MAC + IP 的组合。**
-
-这直接决定了两件事：
-
-1. 想让上游把你当成两个客户端，你必须 **有两个不同的 MAC / IP**；
-2. 仅仅复制一份配置文件、绑同一个接口跑两个进程，是 **没有意义的**——它们会互相
-   顶掉会话，而且因为 Client-ID 不同，还会触发身份错乱。
-
-### 1.2 和 PPPoE 多拨的区别
-
-| | PPPoE 多拨 | 校园网 CCTP 多拨 |
-|---|---|---|
-| 身份载体 | PPPoE 会话 ID + 账号 | MAC + IP + Client-ID |
-| 每个会话的接口 | 天然独立（`pppoe-wan`） | **需要你自己造**（macvlan / 物理口） |
-| 认证时机 | 拨号时 | 拿到 DHCP 租约 **之后** |
-| 失败表现 | 拨号失败 | 认证成功但流量黑洞（更阴险） |
-
-结论：校园网多拨比 PPPoE 多拨多了一整个“造接口 + 分路由”的前置工作，
-而且失败模式更隐蔽。
-
-### 1.3 上游必须满足的两个前提
-
-在动手之前，请先用一台普通电脑 / 手机验证：
-
-- **前提 1：同一账号允许多会话。** 用手机登录、再用电脑登录，看手机是否被踢。
-  如果第二个会话直接把第一个顶下线，多拨在你的接入点上不成立。
-- **前提 2：每个 MAC 能拿到独立 IP。** 换个 MAC 插同一根线，DHCP 要能给出 **不同** 的地址。
-  如果所有 MAC 拿到同一个 IP，说明上游按端口 / 账号做绑定，macvlan 方案无效。
-
-两条里任何一条不满足，后面的工作都不用做。
-
----
-
-## 2. 架构选型
-
-### 2.1 方案 A：多物理口多拨
-
-```text
-        ┌──────────────┐
-  eth1 ─┤ wan   table 1├─ 0x100 ─┐
-        │              │         │
-  lan1 ─┤ wan2  table 2├─ 0x200 ─┤
-        │              │         ├─ mwan3 balanced
-        │   OpenWrt    │         │
-  lan2 ─┤   br-lan     │         │
-        └──────┬───────┘         │
-               │                 │
-           你的电脑 ─────────────┘
-```
-
-**适用**：路由器有多个 WAN 口，且每个口都能独立上联（不同交换机端口 / 不同线路）。
-**优点**：物理隔离，一条线抖动不影响另一条；上游看到的是两个真实端口，最不容易被策略针对。
-**缺点**：需要多个可用上联口。
-
-### 2.2 方案 B：macvlan 单线多拨（推荐给单线场景）
-
-```text
-                  ┌──────────────────────────────┐
-                  │           OpenWrt            │
-   一根网线 ──────┤ eth1 (父接口)                │
-                  │   ├── mvw1   macvlan  table 3│──0x300──┐
-                  │   └── mvlw1  macvlan  table 4│──0x400──┤
-                  │                              │         ├─ mwan3
-                  │ br-lan ── 你的电脑           │         │
-                  └──────────────────────────────┘         │
-                                                           │
-       上游看到 3 个不同 MAC → 3 个 DHCP 租约 → 3 个身份 ───┘
-```
-
-macvlan 让一个物理网卡持有多个 MAC 地址，每个 MAC 独立发 DHCP、独立认证。
-**不需要 netns，不需要 veth，不需要 NAT**，因为所有会话都在根命名空间里，
-netifd 直接给每个会话配一张路由表。
-
-**适用**：只有一根网线可用。
-**关键约束**：macvlan 的每个子接口都要能拿到独立 DHCP 租约（前提 2）。
-
-### 2.3 方案 C：netns + veth（我们为什么放弃）
-
-我们早期真的这么做：给每个虚拟会话开一个 network namespace，dialer 跑在 namespace 里，
-用 veth 对连回根命名空间，再配 NAT 和转发规则。
-
-它能做到：会话之间彻底隔离，连路由表都不会串。
-
-它的代价：
-
-- 每个会话要维护 **veth 对 + namespace 内地址 + NAT + 转发 + LAN 回程路由**；
-- DHCP 客户端跑在 namespace 里，而 netifd 在根命名空间，两边状态要手动同步；
-- 任何一个环节漏了，症状都是“认证成功但上不了网”，排查要跨两个命名空间；
-- 清理时要按 owner 标记逐个杀进程、删 namespace，容易留下僵尸状态。
-
-换成 macvlan 直拨后，同样的功能只需要：**一条 `ip link` + 一个 UCI 接口 + 一条 `ip rule`**。
-所以方案 C 在本项目里已经废弃。
-
-> 什么情况下还值得用 netns？当你要给不同会话 **完全不同的 DNS、防火墙策略或路由策略**，
-> 并且愿意为此付出上面的维护成本时。
-
----
-
-## 3. 前置检查
-
-在路由器上执行，确认环境齐备：
+备份命令：
 
 ```sh
-# 架构（决定你编译哪个 GOARCH）
-uname -m
-opkg print-architecture
-
-# OpenWrt 版本
-head -3 /etc/openwrt_release
-
-# 必需组件
-opkg list-installed | grep -E 'mwan3|kmod-macvlan|ip-full|curl'
+backup="/root/esurfing-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$backup"
+cp -p /etc/config/network /etc/config/firewall "$backup/"
+[ ! -f /etc/config/mwan3 ] || cp -p /etc/config/mwan3 "$backup/"
+[ ! -d /etc/esurfingdialer ] || cp -pR /etc/esurfingdialer "$backup/"
+echo "$backup"
 ```
 
-缺什么装什么：
+这些备份可能含账号信息，只留在自己的设备上。若是远程维护，请先保留一条独立的管理通道。
+
+查看接口名：
+
+```sh
+ubus call network.interface.wan status
+ip -4 address
+ip -4 route
+```
+
+`wan` 是 OpenWrt 网络接口名，`eth1`、`lan1` 是设备名，二者不要混填。拨号器的 `bind_interface` 填设备名。
+
+## 2. 安装需要的组件
+
+在 LuCI 的“系统 → 软件包”中安装：
+
+- `mwan3`、`luci-app-mwan3`：多出口选路和管理界面；
+- `ip-full`、`curl`：查看路由和检测出口；
+- `kmod-macvlan`：只有单线方案需要。
+
+使用 opkg 的固件也可执行：
 
 ```sh
 opkg update
-opkg install mwan3 ip-full curl kmod-macvlan
+opkg install mwan3 luci-app-mwan3 ip-full curl
+# 只有单线方案需要：
+opkg install kmod-macvlan
 ```
 
-> `ip-full` 很重要：busybox 的 `ip` 不支持完整的 `ip rule` / 策略路由语法。
+使用 apk 的固件应改用对应的包管理器。mwan3 的 iptables 兼容版和原生 nftables 版配置细节可能不同，请按固件选择；不要把软件包和路由标记从其他机器整套复制过来。下面的路由标记例子以传统 mwan3 配置为例。
 
-确认你的 WAN 口物理名：
+## 3. 两根网线：两个物理出口
 
-```sh
-ubus call network.interface.wan status | jsonfilter -e '@.l3_device'
-# 例如 eth1
-```
-
-后面所有例子里的 `eth1` / `lan1` 都要换成你自己的接口名。
-
----
-
-## 4. 第一步：让单拨先稳定跑起来
-
-**不要跳过这一步。** 多拨的所有问题都会被单拨阶段的错误掩盖。
-
-### 4.1 编译
-
-在你的电脑上（不是路由器上）：
-
-```sh
-cd esurfingdialer-go
-
-# ARM64 软路由
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o esurfingdialer ./cmd/esurfingdialer
-
-# MT7621 / MT7628
-GOOS=linux GOARCH=mipsle GOMIPS=softfloat CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o esurfingdialer ./cmd/esurfingdialer
-```
-
-也可以用 `make release` 一次编出全部架构，产物在 `dist/`。
-
-### 4.2 部署
-
-```sh
-scp esurfingdialer root@192.168.1.1:/usr/bin/
-ssh root@192.168.1.1
-chmod +x /usr/bin/esurfingdialer
-mkdir -p /etc/esurfingdialer
-```
-
-### 4.3 配置
-
-```sh
-cp /path/to/deploy/openwrt/etc/esurfingdialer/wan.json.example /etc/esurfingdialer/wan.json
-chmod 600 /etc/esurfingdialer/wan.json
-vi /etc/esurfingdialer/wan.json
-```
-
-填 `user` / `password`，先 **不要** 设 `bind_interface` 和 `bind_fwmark`。
-
-### 4.4 前台跑通
-
-```sh
-/usr/bin/esurfingdialer -c /etc/esurfingdialer/wan.json --log-level debug
-```
-
-盯住这行：
+示例接法：
 
 ```text
-[INFO] The login has been authorized.
+校园网线 A → 路由器 WAN（eth1）→ wan
+校园网线 B → 路由器 LAN1（lan1）→ wan2
+电脑        → 路由器另一个 LAN 口
 ```
 
-然后验证数据面：
+### 配置 WAN2
 
-```sh
-curl -s -o /dev/null -w '%{http_code}\n' http://connect.rom.miui.com/generate_204
-# 期望 204
-```
+在 LuCI 中操作：
 
-### 4.5 判定标准
+1. “网络 → 设备”，把准备作为 WAN2 的端口从 `br-lan` 中移出。不要移除电脑当前连接的管理端口。
+2. “网络 → 接口”，新建 `wan2`，协议选 DHCP 客户端，设备选择该端口。
+3. 将 `wan2` 加入现有 WAN 防火墙区域，保留该区域的地址伪装和 LAN → WAN 转发。
+4. 在高级设置中，为 `wan`、`wan2` 分别设不同的路由跃点，例如 10、20。
+5. 保存并应用，确认两条线路都有 IPv4 地址和默认路由。
 
-单拨阶段必须全部满足才继续：
-
-- [ ] 日志出现 `The login has been authorized.`
-- [ ] captive 探测返回 `204`（不是 302、不是超时）
-- [ ] 日志里出现 `Keep Url` / `Term Url` / `Keep Retry`
-- [ ] 挂机 10 分钟，日志里周期性出现 `Send Keep Packet`，没有反复重认证
-- [ ] `Ctrl-C` 退出后，日志里没有 `term error`（或只有超时告警）
-
----
-
-## 5. 第二步：多物理口多拨
-
-假设：`eth1` 是 WAN1，`lan1` 是 WAN2。
-
-### 5.1 给每个口一张路由表
+对应的网络配置大致如下。只用于对照字段，**不要覆盖整个 `/etc/config/network`**：
 
 ```uci
-# /etc/config/network
 config interface 'wan'
-	option device 'eth1'
-	option proto 'dhcp'
-	option ip4table '1'
-	option defaultroute '1'
-	option peerdns '0'
+    option device 'eth1'
+    option proto 'dhcp'
+    option metric '10'
 
 config interface 'wan2'
-	option device 'lan1'
-	option proto 'dhcp'
-	option ip4table '2'
-	option defaultroute '1'
-	option peerdns '0'
+    option device 'lan1'
+    option proto 'dhcp'
+    option metric '20'
 ```
 
-执行 `uci commit network && /etc/init.d/network reload`。
+本例让 mwan3 管理每个出口的策略路由表，不再另外填写 `ip4table '1'`、`ip4table '2'`。
+
+### 给每条线路一份拨号配置
+
+建立 `/etc/esurfingdialer/wan.local.json` 和 `/etc/esurfingdialer/wan2.local.json`。每个文件都填有权使用的账号密码，分别设置：
+
+```json
+{
+  "user": "你的拨号账号",
+  "password": "你的拨号密码",
+  "log_level": "info",
+  "bind_interface": "eth1"
+}
+```
+
+第二个文件将 `bind_interface` 改为 `lan1`。使用不同账号时，账号密码也分别填写。
+
+先在两个 SSH 窗口中前台运行，暂时不要设开机自启：
 
 ```sh
-# 验证：两张表各有一条 default
-ip route show table 1 | head -2
-ip route show table 2 | head -2
+# 窗口一
+/usr/bin/esurfingdialer -c /etc/esurfingdialer/wan.local.json
 ```
 
-> `ip4table` 是 OpenWrt 的关键字：让 netifd 把这个接口的默认路由装进指定表，
-> 而不是全部塞进 main 表。这是策略路由的地基。
+```sh
+# 窗口二：第一条稳定后再启动
+/usr/bin/esurfingdialer -c /etc/esurfingdialer/wan2.local.json
+```
 
-### 5.2 给每个实例一个服务
+## 4. 配置 mwan3
+
+在 LuCI 的“网络 → 负载均衡 / MultiWAN 管理”中设置：
+
+1. 添加并启用 `wan`、`wan2` 两个接口。名字要与“网络 → 接口”一致。
+2. 每个接口填至少两个在当地能稳定响应 ping 的检测地址，避免单一检测目标故障造成误判。
+3. 建立两个成员：各自关联一条接口，成员跃点相同、权重均为 1。
+4. 建立 `balanced` 策略，加入这两个成员。
+5. 将默认 IPv4 规则指向 `balanced`。游戏、SSH 或其他需要出口稳定的流量，可以单独设规则固定到一条线路。
+
+注意网络接口的路由跃点应不同，而 balanced 中两个成员的跃点应相同。下面只展示成员和策略字段，接口检测与规则仍需在 LuCI 中完成：
 
 ```uci
-# /etc/config/esurfingdialer
-config instance 'wan'
-	option enabled '1'
-	option config_file '/etc/esurfingdialer/wan.json'
-	option interface 'wan'
-	option bind_interface 'eth1'
-	option bind_fwmark '0x100'
-	option log_level 'info'
+config member 'wan_equal'
+    option interface 'wan'
+    option metric '1'
+    option weight '1'
 
-config instance 'wan2'
-	option enabled '1'
-	option config_file '/etc/esurfingdialer/wan2.json'
-	option interface 'wan2'
-	option bind_interface 'lan1'
-	option bind_fwmark '0x200'
-	option log_level 'info'
+config member 'wan2_equal'
+    option interface 'wan2'
+    option metric '1'
+    option weight '1'
+
+config policy 'balanced'
+    list use_member 'wan_equal'
+    list use_member 'wan2_equal'
 ```
 
-两份 json 的 `user` / `password` 各自填好。
+### 检查拨号器是否走对出口
 
 ```sh
-cp deploy/openwrt/etc/init.d/esurfingdialer /etc/init.d/
-chmod +x /etc/init.d/esurfingdialer
-/etc/init.d/esurfingdialer enable
-/etc/init.d/esurfingdialer start
-
-# 看两个实例是否都起来了
-ubus call service list '{"name":"esurfingdialer"}' | jsonfilter -e '@.esurfingdialer.instances.*.running'
-```
-
-### 5.3 源地址规则
-
-```uci
-# /etc/config/esurfingdialer（续）
-config source_rule 'wan'
-	option device 'eth1'
-	option table '1'
-	option priority '801'
-
-config source_rule 'wan2'
-	option device 'lan1'
-	option table '2'
-	option priority '802'
-```
-
-配合 `deploy/openwrt/etc/hotplug.d/iface/95-esurfing-source-rules`，
-每次 DHCP 续约都会把规则重新钉到当前地址上。
-
-```sh
-ip rule show
-# 801:	from 10.1.1.5 lookup 1
-# 802:	from 10.2.2.9 lookup 2
-```
-
-### 5.4 mwan3 负载均衡
-
-```sh
-cp deploy/openwrt/etc/config/mwan3.example /etc/config/mwan3
-vi /etc/config/mwan3        # 把 track_ip 换成你能 ping 通的地址
-/etc/init.d/mwan3 restart
 mwan3 status
+ip -4 rule show
+ip -4 route show table all
 ```
 
-关键点：`mwan3` **只负责选路，不负责拨号**。任何一个 member 在加入之前，
-都必须先用 `esurfingdialer-nettest.sh` 证明它能通：
+如果需要通过 fwmark 固定认证请求的出口，先从 `ip rule` 中找到对应的 mark 和路由表，再检查路由表里的默认路由属于哪个设备。
+
+例如实际输出是：
+
+```text
+2001: from all fwmark 0x100/0x3f00 lookup 1
+2002: from all fwmark 0x200/0x3f00 lookup 2
+```
+
+且表 1、表 2 分别指向 `eth1`、`lan1`，才在两份 JSON 中分别增加 `"bind_fwmark": "0x100"`、`"bind_fwmark": "0x200"`，然后逐个重启拨号实例。接口顺序或掩码不同时，标记也可能不同，不能直接照抄。
 
 ```sh
-esurfingdialer-nettest.sh eth1
-esurfingdialer-nettest.sh lan1
+ip -4 route show table 1
+ip -4 route show table 2
+ip -4 route get 1.1.1.1 mark 0x100
+ip -4 route get 1.1.1.1 mark 0x200
 ```
 
-### 5.5 验证
+若使用 `bind_source_ip`，DHCP 续租换地址后必须同步修改；一般先用设备绑定和已核对的 fwmark，不要为了“配得全”填写一个会过期的源地址。
 
-```sh
-# 每条路径单独出网
-curl --interface eth1 -s -o /dev/null -w 'eth1 %{http_code}\n' http://connect.rom.miui.com/generate_204
-curl --interface lan1 -s -o /dev/null -w 'lan1 %{http_code}\n' http://connect.rom.miui.com/generate_204
+## 5. 一根网线：macvlan 双拨
 
-# 按 fwmark 选路（模拟 dialer 的走法）
-ip route get 223.5.5.5 mark 0x100
-ip route get 223.5.5.5 mark 0x200
-```
+适用前提：同一个上联端口允许多个 MAC 获得独立 DHCP 地址，账号也允许并发登录。不能满足前提时，不要反复创建虚拟接口尝试。
 
-两条都要出 `204`，且 `ip route get` 显示的是各自的表。
-
----
-
-## 6. 第三步：macvlan 单线多拨
-
-### 6.1 手工验证可行性（必做）
-
-在写任何脚本之前，先手工造一个虚拟接口，确认上游会给它独立 IP：
-
-```sh
-# 造一个 macvlan，MAC 用本地管理地址（第一字节第二位为 1，例如 02/06/0A/0E）
-ip link add link eth1 name mvw-test type macvlan mode bridge
-ip link set mvw-test address 02:00:00:00:01:01
-ip link set mvw-test up
-
-# 手工要一个 DHCP 地址
-udhcpc -i mvw-test -q -n -t 10
-ip -4 addr show dev mvw-test
-```
-
-**判定**：拿到的 IP 必须与 `eth1` 上的 **不同**。
-如果是同一个 IP，或者根本拿不到，说明上游按端口 / 账号绑定，macvlan 方案在你的接入点
-不成立，请回到方案 A。
-
-验证完清理掉：
-
-```sh
-ip link del mvw-test
-```
-
-### 6.2 让 netifd 管理虚拟接口
-
-我们不手工跑 `udhcpc`——交给 netifd，它会在租约变化时自动更新路由表：
+保留现有 `wan`，只增加一个虚拟设备。下面是需要添加的配置段；在本地备份后编辑 `/etc/config/network`，不要替换原有 LAN 配置：
 
 ```uci
-# /etc/config/network
+config device 'esurfing_mvw1'
+    option name 'mvw1'
+    option type 'macvlan'
+    option ifname 'eth1'
+    option mode 'bridge'
+    option macaddr '02:00:00:00:10:01'
+
 config interface 'vwan1'
-	option device 'mvw1'
-	option proto 'dhcp'
-	option ip4table '3'
-	option defaultroute '1'
-	option peerdns '0'
-	option ipaddr ''        # 租约 hint，由脚本写回
+    option device 'mvw1'
+    option proto 'dhcp'
+    option metric '20'
 ```
 
-> 接口名（`vwan1`）和 macvlan 设备名（`mvw1`）是两个东西。
-> 前者是 netifd 的逻辑接口，后者是内核里的网卡。脚本会按配置把两者关联起来。
+`eth1` 换成实际物理 WAN，MAC 使用自己选定的、不与现有设备重复的本地管理地址。配置字段以固件的 netifd 支持情况为准。
 
-### 6.3 多拨会话配置
-
-```uci
-# /etc/config/esurfing-multidial
-config session 'vwan1'
-	option enabled '1'
-	option parent 'eth1'
-	option device 'mvw1'
-	option mac '02:00:00:00:01:01'
-	option table '3'
-	option fwmark '0x300'
-	option priority '803'
-	option base_config '/etc/esurfingdialer/wan.json'
-```
-
-字段含义：
-
-| 选项 | 作用 |
-|---|---|
-| `parent` | macvlan 挂在哪张物理网卡上 |
-| `device` | macvlan 网卡名 |
-| `mac` | 这个会话的身份 MAC，**必须全局唯一** |
-| `table` | netifd 装默认路由的路由表号，要和 `network` 里 `ip4table` 一致 |
-| `fwmark` | dialer 给 socket 打的 `SO_MARK`，和 mwan3 的 mmx_mask 对齐 |
-| `priority` | `ip rule` 优先级；数值越小越先匹配，要避开 mwan3 已占用的区间 |
-| `base_config` | 复用哪份账号配置；脚本只覆盖 `bind_fwmark` / `bind_source_ip` |
-
-### 6.4 启动
+在 LuCI 中将 `vwan1` 加入 WAN 防火墙区域，保存并应用后检查：
 
 ```sh
-cp deploy/openwrt/usr/libexec/esurfing-macvlan-multidial /usr/libexec/
-chmod +x /usr/libexec/esurfing-macvlan-multidial
-cp deploy/openwrt/etc/config/esurfing-multidial /etc/config/
-
-/usr/libexec/esurfing-macvlan-multidial start-one vwan1
-/usr/libexec/esurfing-macvlan-multidial status vwan1
+ubus call network.interface.vwan1 status
+ip -4 address show dev mvw1
 ```
 
-期望输出：
-
-```text
-vwan1: created macvlan mvw1 on eth1 mac=02:00:00:00:01:01
-vwan1: lease 10.3.3.7 on mvw1
-vwan1: source rule ready 10.3.3.7 -> table 3 (priority 803)
-vwan1: dialer started pid=12345
-vwan1: ready ip=10.3.3.7 device=mvw1 captive=204
-
-vwan1 device=mvw1 link=up ip=10.3.3.7 dialer_alive=yes table_default=yes
-```
-
-五个字段全绿才算成功。`link=up` 但 `dialer_alive=no` 说明认证挂了，
-去看 `/tmp/vwan1.dialer.log`。
-
-### 6.5 为什么要有租约 hint
-
-macvlan 会话重启时，如果 DHCP 给了新 IP，Portal 会把它算成一个 **全新的在线设备**，
-而不是“老设备重连”。会话数一多，很容易撞上在线数上限。
-
-脚本的做法是把上次成功租约写进 UCI：
+确认虚拟设备获得地址，再建立 `/etc/esurfingdialer/vwan1.local.json`，将 `bind_interface` 填为 `mvw1`，运行第二个拨号实例：
 
 ```sh
-uci get network.vwan1.ipaddr
-# 10.3.3.7
+/usr/bin/esurfingdialer -c /etc/esurfingdialer/vwan1.local.json
 ```
 
-这只是 **请求**，DHCP 服务器仍然是权威。但把 MAC / IP 这一对稳定下来，能明显减少
-`online user limit` 类型的失败。这是我们踩了坑之后才加上的。
+接下来按第 4 节配置 mwan3，只是把 `wan2` 换成 `vwan1`。需要 fwmark 时，同样先核对实际路由表。
 
----
+如果学校还有独立门户，每个新 MAC 可能都需要完成门户登录。在对应配置中填写自己的 `portal_url`、`portal_user`、`portal_password` 和出口 MAC，再开启 `portal_auto_login`；不要盲目复制另一条线路的门户 MAC。
 
-## 7. 第四步：策略路由（最容易翻车的地方）
+这里没有提供 netns/veth 的整套部署脚本。它需要另外处理命名空间中的 DHCP、路由和 NAT，不应与本节的直接 macvlan 配置混用。
 
-### 7.1 问题
+## 6. 验证两条线路
 
-多拨之后你有 2~4 张默认路由表，但 **内核只看 main 表**。所以：
-
-- `curl` 默认走 main 表 → 永远只从一条线出去；
-- dialer 的认证流量如果也走 main 表 → 多个实例的流量从同一条线出去 → 上游看到的
-  源 IP 和会话对不上 → 认证成功但流量黑洞。
-
-### 7.2 两种绑定方式，选 fwmark
-
-| | 源地址绑定 `--bind-source-ip` | fwmark 绑定 `--bind-fwmark` |
-|---|---|---|
-| 原理 | socket 绑本地源地址 | socket 打 `SO_MARK`，由 `ip rule` 选表 |
-| DHCP 换 IP 后 | **静默失效** | 不受影响 |
-| 需要额外规则 | `from <ip> lookup <table>` | `fwmark <mark> lookup <table>` |
-| 结论 | 作为补充 | ✅ **主力** |
-
-**根因**：源地址绑定把 IP 写死在 socket 上。续约换 IP 的那一刻，原来那条
-`from <旧IP> lookup 3` 规则再也匹配不到任何包，流量悄悄回落到 main 表——
-不报错、不掉线，只是慢 / 串线。这就是为什么我们最终以 fwmark 为主。
-
-### 7.3 完整的规则链
+双物理口：
 
 ```sh
-ip rule show
+curl --interface eth1 -m 10 -sS -o /dev/null -w '%{http_code}\n' http://connect.rom.miui.com/generate_204
+curl --interface lan1 -m 10 -sS -o /dev/null -w '%{http_code}\n' http://connect.rom.miui.com/generate_204
 ```
 
-```text
-0:	from all lookup local
-801:	from 10.1.1.5 lookup 1        # wan   源地址规则（hotplug 维护）
-802:	from 10.2.2.9 lookup 2        # wan2  源地址规则
-803:	from 10.3.3.7 lookup 3        # vwan1 源地址规则
-1001:	from all fwmark 0x100/0x3f00 lookup 1    # mwan3: wan
-1002:	from all fwmark 0x200/0x3f00 lookup 2    # mwan3: wan2
-1008:	from all fwmark 0x300/0x3f00 lookup 3    # mwan3: vwan1
-32766:	from all lookup main
-32767:	from all lookup default
-```
+单线双拨将第二条命令的 `lan1` 改为 `mvw1`。正常应返回 204；302 通常需要检查门户，超时则先排查出口、DHCP 和路由。检测站点不可用时换一个能访问的目标，不要只凭单次探测下结论。
 
-读法（**从上往下，第一条匹配即生效**）：
+还要从 LAN 上实际浏览网页，观察一段时间，确认两条线路没有交替失效。我们曾遇到新增身份认证成功、但原有线路不能转发的情况，所以“日志显示登录成功”不能代替这个检查。
 
-1. `local` 表最高优先，本地地址永远走本地；
-2. 801–804 把“源地址 = 某个 WAN 的地址”的包钉到对应表——这是给 **没打 mark 的流量**
-   兜底的（例如路由器自己发的、走了 main 表的程序）；
-3. 1001+ 是 mwan3 给打过 mark 的流量选表；
-4. 剩下的才走 main / default。
+测速请使用多连接测试。mwan3 分配的是连接，不会把一个普通 TCP 连接自动拆到两条线路上；单连接速度没有翻倍不等于双拨失败。
 
-> **顺序很重要。** 如果源地址规则排到 mwan3 的 fwmark 规则后面，就会出现
-> “mwan3 选好了表，又被源地址规则改回去”的诡异现象。我们把源地址规则放在 8xx，
-> 把 mwan3 留在 1xxx。
+## 7. 确认稳定后再设开机自启
 
-### 7.4 手工验证
+下面是单个实例的 procd 服务示例，保存为 `/etc/init.d/esurfing-wan`。它只启动拨号器，不创建接口，也不修改路由或防火墙：
 
 ```sh
-# 按 mark 查表
-ip route get 223.5.5.5 mark 0x300
-# 期望：dev mvw1 ... table 3
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=95
+STOP=10
 
-# 按源地址查表
-ip route get 223.5.5.5 from 10.3.3.7
-# 期望：dev mvw1 ... table 3
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/esurfingdialer -c /etc/esurfingdialer/wan.local.json
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param file /etc/esurfingdialer/wan.local.json
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_interface_trigger 'interface.*' 'wan' /etc/init.d/esurfing-wan restart
+}
 ```
 
-两个结果必须一致。不一致说明规则顺序或者表号配错了。
-
-### 7.5 反 martian / rp_filter
-
-多个接口持有同一网段的地址时，内核会因为“包从错误的接口进来”丢掉它。
-如果出现“能 ping 通网关但上不了公网”，检查：
+先停止之前前台运行的同一实例，再启用服务：
 
 ```sh
-sysctl net.ipv4.conf.all.rp_filter
-sysctl net.ipv4.conf.mvw1.rp_filter
+chmod 755 /etc/init.d/esurfing-wan
+/etc/init.d/esurfing-wan enable
+/etc/init.d/esurfing-wan start
+logread -e esurfing
 ```
 
-按需放宽（放在 `/etc/sysctl.d/` 或 `/etc/firewall.user` 里）：
+第二个实例另建 `/etc/init.d/esurfing-wan2`：同时替换配置路径、触发器里的网络接口名和服务路径。单线方案则用 `vwan1` 和相应配置文件。不要让前台进程和 procd 同时拨同一个出口。
 
-```sh
-sysctl -w net.ipv4.conf.all.rp_filter=2
-sysctl -w net.ipv4.conf.mvw1.rp_filter=2
-```
+DHCP 更新后，如果填写过 `bind_source_ip`，需要先更新配置再重启该实例。设置完后，在本地进行一次重启检查，确认接口、拨号服务和 mwan3 都能恢复。
 
-> 放宽 rp_filter 有安全含义，只在你能控制上联环境时这么做。
+## 8. 出问题时先退回单拨
 
----
+- 没有 DHCP 地址：先检查物理口或 macvlan，不要先改拨号参数。
+- 报 `63022` 或在线用户数量限制：停止新增实例，等旧会话释放，核对账号的并发许可。
+- 第二路上线后第一路断网：停止第二路，恢复单拨；不要继续加第三、第四路。
+- 双拨后游戏或管理连接不稳定：先将相关流量固定到一条可用线路，再排查选路。
 
-## 8. 第五步：服务化与自愈
+回退时，在本地按相反顺序操作：先停止并禁用新增拨号服务，再将 mwan3 默认规则切回主 WAN，最后禁用新增网络接口。需要完全恢复时，用第 1 节备份逐项恢复 network、firewall、mwan3；不要在没有备用连接的情况下远程重载整套网络。
 
-### 8.1 procd 守护
-
-```sh
-cp deploy/openwrt/etc/init.d/esurfingdialer /etc/init.d/
-chmod +x /etc/init.d/esurfingdialer
-/etc/init.d/esurfingdialer enable
-/etc/init.d/esurfingdialer start
-```
-
-脚本为每个 `config instance` 起一个 procd 实例，并带上：
-
-- `GOMAXPROCS=1`：这个进程是 I/O 密集、CPU 空闲的，限制 P 的数量能显著减少
-  调度器线程和内存占用；
-- `respawn`：挂掉自动拉起；
-- `term_timeout 30`：给主动下线留足时间（TERM 请求本身可能超时，见战场笔记）；
-- `procd_set_param file`：配置文件变更时触发 reload。
-
-### 8.2 接口事件
-
-```sh
-cp deploy/openwrt/etc/hotplug.d/iface/99-esurfingdialer /etc/hotplug.d/iface/
-cp deploy/openwrt/etc/hotplug.d/iface/95-esurfing-source-rules /etc/hotplug.d/iface/
-chmod +x /etc/hotplug.d/iface/99-esurfingdialer /etc/hotplug.d/iface/95-esurfing-source-rules
-```
-
-- `99-esurfingdialer`：接口 up / update 时重启对应实例（DHCP 换了 wlanuserip 必须重新认证）；
-- `95-esurfing-source-rules`：把源地址规则重新钉到新租约上。
-
-### 8.3 开机顺序
-
-macvlan 会话 **必须等父线路稳定之后再开**。原因：父线路自己还在认证时，
-Portal 会把你的虚拟会话算进一个“半成品”身份里，容易触发上限。
-
-我们脚本里的做法是等 90 秒：
-
-```sh
-SETTLE_SECONDS=90        # /usr/libexec/esurfing-macvlan-multidial
-```
-
-这个值按你的接入点认证速度调整。太快会撞上限，太慢影响开机体验。
-
-### 8.4 健康检查
-
-```sh
-# 前台跑，每 30 秒检查一次每个会话的进程与路由表
-/usr/libexec/esurfing-macvlan-multidial watch
-```
-
-它会做三件事：dialer 进程死了就停掉该会话、路由表丢了默认路由就告警、
-源地址规则丢了就补回来。
-
-### 8.5 时间同步
-
-OpenWrt 时间不对会让日志时间错乱，也会影响 `local-time` 字段（部分接入点会校验）：
-
-```sh
-uci set system.@system[0].zonename='Asia/Shanghai'
-uci set system.@system[0].timezone='CST-8'
-uci set system.ntp.enabled='1'
-uci commit system
-/etc/init.d/system reload
-/etc/init.d/sysntpd restart
-```
-
----
-
-## 9. 排障手册
-
-### 9.1 症状 → 原因 → 处理
-
-| 症状 | 大概率原因 | 处理 |
-|---|---|---|
-| `no route to host` | 认证流量走了 main 表，从错误的线路出去 | 加 `--bind-fwmark`，并确认 `ip rule` 里有对应规则 |
-| 日志停在 `session initialization is still failing` | ZSM 模块解析失败 / 服务端给了不同的模块 | 试 `legacy_user_agent`；开 `--log-level debug` 看字节数与 SHA-256 |
-| `invalid zsm data` 周期性出现 | Client-ID 与协商状态没一起清理 | 升级到包含 Client-ID 生命周期修复的版本 |
-| `login rejected: ...` | 账号 / 密码 / 验证码问题，响应缺 `keep-url` | 看日志里的脱敏字段；确认是否需要短信验证码 |
-| 认证成功但 `curl` 超时 | 数据面没通：策略路由 / rp_filter / 上游互斥 | 依次查 `ip rule`、`ip route get`、rp_filter；再看是不是第三路把前两路顶掉了 |
-| `online user limit` | 上游在线数上限 | 减少会话数；稳定 MAC / IP 对（租约 hint） |
-| 单个会话反复重认证 | 用 captive 探测判死导致的认证风暴 | 确认版本中 KEEP 是唯一存活信号；不要自己写探测脚本杀进程 |
-| `term error` 超时 | TERM 接口响应慢 | 正常现象，best-effort；不影响退出 |
-| macvlan 拿不到 DHCP | 上游按端口 / 账号绑定 | 回到方案 A（多物理口） |
-| `ip rule` 里规则时有时无 | DHCP 续约换了地址 | 部署 `95-esurfing-source-rules` hotplug |
-| 重启后会话顺序错乱 | 父线路还没认证完就开了子会话 | 增大 `SETTLE_SECONDS` |
-
-### 9.2 必会的观测命令
-
-```sh
-# 每个会话的进程与路由表
-/usr/libexec/esurfing-macvlan-multidial status
-
-# 路由决策
-ip route get 223.5.5.5 mark 0x300
-ip route get 223.5.5.5 from 10.3.3.7
-
-# 规则与表
-ip rule show
-ip route show table 3
-
-# 网卡与地址
-ip -details link show dev mvw1
-ip -4 addr show
-
-# 单个接口的通断
-esurfingdialer-nettest.sh mvw1
-
-# 日志
-logread -f -e esurfingdialer
-tail -f /tmp/vwan1.dialer.log
-```
-
-### 9.3 真实内存占用怎么看
-
-`ps` 或 `top` 里的 `VSZ` 是虚拟地址空间，**不是** 实际占用。Go 进程请查 `VmRSS`：
-
-```sh
-for pid in $(pidof esurfingdialer); do
-	echo "PID=$pid"
-	grep -E '^(VmSize|VmRSS|VmHWM|Threads):' /proc/$pid/status
-done
-free -m
-```
-
-有 `smaps_rollup` 的话可以看更细的私有 / 共享常驻页。
-
----
-
-## 10. 实测数据与容量规划
-
-以下是我们那台路由器上的观测量级（具体数值随固件和会话数变化，仅供规划参考）：
-
-| 会话数 | 每实例常驻内存 | 稳定性 |
-|---|---|---|
-| 1 | 十几 MB | 稳 |
-| 2 | 十几 MB × 2 | 稳，长期运行 |
-| 3 | 十几 MB × 3 | **认证能过，但数据面出现互斥** |
-| 4 | 十几 MB × 4 | 四者身份可达性轮换，不可用于生产 |
-
-第三条会话的实测时间线（单变量实验：不动已稳定的两条物理线，只加第三条）：
-
-```text
-20:55:24  第三条认证成功
-20:55:44  第三个身份首个 KEEP 成功
-20:56:15  物理线路 1 被黑洞
-20:57:32  两条物理线路同时不可达，第三条仍可达
-          全程零错误码、零 online user limit
-```
-
-停掉第三条后，物理线路自行恢复。
-
-**结论**：在这种接入点上，**两路是安全上限**。第三路不是“配置问题”，是上游策略。
-想验证更多路，必须本地有人值守，并准备好回滚。
-
----
-
-## 11. 回滚
-
-多拨改动集中在四层，回滚也按层来：
-
-```sh
-# 1. 停掉虚拟会话
-/usr/libexec/esurfing-macvlan-multidial stop
-
-# 2. 把虚拟接口从 mwan3 摘掉
-uci set mwan3.vwan1.enabled='0'
-uci set mwan3.vwan2.enabled='0'
-uci commit mwan3
-/etc/init.d/mwan3 restart
-
-# 3. 恢复 network（删掉 vwan 接口段）
-vi /etc/config/network
-/etc/init.d/network reload
-
-# 4. 确认只剩物理两路
-ip rule show
-ip route show table 1 | head -2
-ip route show table 2 | head -2
-mwan3 status
-```
-
-回滚的验收标准：**两条物理线路各自 `204`，main 表默认路由正常，零残留 macvlan 接口**。
-
-```sh
-ip -br link | grep -E 'mvw|mvlw'   # 应该没有输出
-```
-
----
-
-## 12. 速查表
-
-```sh
-# ---- 编译 ----
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o esurfingdialer ./cmd/esurfingdialer
-
-# ---- 单拨调试 ----
-/usr/bin/esurfingdialer -c /etc/esurfingdialer/wan.json --log-level debug
-
-# ---- 服务 ----
-/etc/init.d/esurfingdialer enable|start|stop|reload
-
-# ---- macvlan 多拨 ----
-/usr/libexec/esurfing-macvlan-multidial start|stop|status|watch
-/usr/libexec/esurfing-macvlan-multidial start-one vwan1
-/usr/libexec/esurfing-macvlan-multidial stop-one  vwan1
-
-# ---- 验证 ----
-esurfingdialer-nettest.sh mvw1
-curl --interface mvw1 -s -o /dev/null -w '%{http_code}\n' http://connect.rom.miui.com/generate_204
-
-# ---- 路由 ----
-ip rule show
-ip route show table 3
-ip route get 223.5.5.5 mark 0x300
-
-# ---- 日志 ----
-logread -f -e esurfingdialer
-tail -f /tmp/vwan1.dialer.log
-```
-
----
-
-## 附：术语
-
-| 词 | 含义 |
-|---|---|
-| **多拨** | 同一账号 / 同一条线路上建立多个独立认证会话 |
-| **macvlan** | 一张物理网卡派生出多个 MAC 的虚拟网卡技术 |
-| **fwmark / SO_MARK** | 内核给 socket 打的标记，供 `ip rule` 选路由表 |
-| **策略路由** | 按源地址 / fwmark 等条件选择路由表，而不是只看目的地址 |
-| **mwan3** | OpenWrt 的多 WAN 负载均衡与故障切换组件 |
-| **ZSM** | 服务端下发、决定本次会话使用哪种加密算法的模块 |
-| **KEEP / TERM** | 会话保活接口 / 主动下线接口，地址由登录响应给出 |
+更多固件相关配置可查阅 [OpenWrt 的 mwan3 文档](https://openwrt.org/docs/guide-user/network/wan/multiwan/mwan3)。

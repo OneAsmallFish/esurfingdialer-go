@@ -117,7 +117,7 @@ func TestPayloadRenderVsJava(t *testing.T) {
 
 	// 与 java-xml.out 字节级比对
 	java := map[string]string{}
-	data, err := os.ReadFile("../../review/cross-validation/java-xml.out")
+	data, err := os.ReadFile("../testdata/cross-validation/java-xml.out")
 	if err != nil {
 		t.Fatalf("read java xml output: %v", err)
 	}

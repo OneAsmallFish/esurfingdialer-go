@@ -49,14 +49,14 @@ func javaOutPath() string {
 	if p := os.Getenv("ESURFING_JAVA_OUT"); p != "" {
 		return p
 	}
-	return "../../review/cross-validation/java-crypto.out"
+	return "../testdata/cross-validation/java-crypto.out"
 }
 
 func goEncOutPath() string {
 	if p := os.Getenv("ESURFING_GO_OUT"); p != "" {
 		return p
 	}
-	return "../../review/cross-validation/go-crypto.out"
+	return "../testdata/cross-validation/go-crypto.out"
 }
 
 // loadJavaEnc 解析 ENC|algo|pN|hex（跳过 ERROR 行）。

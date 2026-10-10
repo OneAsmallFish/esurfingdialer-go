@@ -1,4 +1,4 @@
-# build output (repo root only -- do not match deploy scripts by name)
+# build output (repo root only)
 /esurfingdialer
 /esurfingdialer-*
 /bin/
@@ -6,7 +6,7 @@
 *.exe
 
 # cipher cross-check writes its ENC dump next to the input fixtures
-review/cross-validation/go-crypto.out
+internal/testdata/cross-validation/go-crypto.out
 go-crypto.out
 
 # real credentials -- only *.json.example belongs in the repo

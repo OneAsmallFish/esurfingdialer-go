@@ -1,0 +1,14 @@
+{
+  "user": "你的拨号账号",
+  "password": "你的拨号密码",
+  "log_level": "info",
+  "bind_interface": "",
+  "bind_source_ip": "",
+  "bind_fwmark": "",
+  "sms_code": "",
+  "portal_auto_login": false,
+  "portal_url": "",
+  "portal_user": "",
+  "portal_password": "",
+  "portal_mac": ""
+}

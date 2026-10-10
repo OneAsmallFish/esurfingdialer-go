@@ -31,7 +31,7 @@ func zsmCases() [][]byte {
 }
 
 func TestZSMParseVsJava(t *testing.T) {
-	data, err := os.ReadFile("../../review/cross-validation/java-zsm.out")
+	data, err := os.ReadFile("../testdata/cross-validation/java-zsm.out")
 	if err != nil {
 		t.Fatalf("read java zsm output: %v", err)
 	}

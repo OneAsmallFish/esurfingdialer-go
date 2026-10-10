@@ -1,137 +1,112 @@
-# esurfingdialer
+# esurfingdialer-go
 
-> **把宿舍那根网线，变成两根。**
->
-> 纯 Go 重写的天翼校园网（CCTP）认证客户端：单文件静态二进制，无 JVM、无 GUI，
-> 掉线自动重连，支持多 WAN / 单线多拨 / 开机自启。
+用于天翼校园网的 Go 拨号程序，主要在 OpenWrt 路由器上使用。支持掉线重连，以及为不同出口分别运行拨号实例。
 
-[![ci](https://github.com/OneAsmallFish/esurfingdialer-go/actions/workflows/ci.yml/badge.svg)](https://github.com/OneAsmallFish/esurfingdialer-go/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/OneAsmallFish/esurfingdialer-go?sort=semver)](https://github.com/OneAsmallFish/esurfingdialer-go/releases)
-[![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](go.mod)
+先跑通一条线路，再看[多拨教程](docs/multi-dial.md)。多拨是否可用取决于学校和账号的接入限制，程序不能保证增加会话后带宽就会叠加。
 
-[English](README_EN.md) · [多拨指南](docs/multi-dial.md) · [协议说明](docs/protocol.md) · [排障](docs/troubleshooting.md) · [FAQ](docs/faq.md)
+## 下载
 
----
+在 [Releases](https://github.com/OneAsmallFish/esurfingdialer-go/releases/latest) 下载与你的系统、CPU 架构匹配的文件。路由器上可以先运行 `uname -m` 查看架构。
 
-## 它是什么
+| 常见架构 | 下载文件名中的部分 |
+| --- | --- |
+| ARM64 / aarch64 | `linux-arm64` |
+| x86_64 | `linux-amd64` |
+| ARMv7 | `linux-armv7` |
+| 小端 MIPS，如部分 MT7621 设备 | `linux-mipslesf` |
+| 大端 MIPS | `linux-mipssf` |
 
-协议级实现，不是壳也不是代理：自己完成「探测门户 → 协商算法 → 取票据 → 登录 → 保活
-→ 下线」的完整链路。
+MIPS 文件使用软浮点构建。请同时核对固件架构，不要只凭路由器型号选择文件。下载后可用 Release 中的 `SHA256SUMS` 校验。
 
-| 痛点 | 做法 |
-|---|---|
-| 官方客户端是 App，路由器上跑不了 | 纯 Go 交叉编译出 MIPS / ARM / x86 单文件 |
-| 断线要手动重连 | 常驻保活 + 指数退避重认证 + procd 守护 |
-| 想叠加线路 | 原生绑定接口 / 源地址 / fwmark，适配 mwan3 |
-| 多实例互相干扰 | 一个配置一个进程，procd 精确重启 |
+## 运行
 
-支持 AES-CBC/ECB、DESede-CBC/ECB、SM4-CBC/ECB、ZUC、ModXTEA 等算法，唯一第三方依赖是
-[gmsm](https://github.com/emmansun/gmsm)（提供 SM4 与 ZUC）。
+下面以 OpenWrt 为例；路由器管理地址、出口设备名需要换成自己的。
 
-它 **不** 做破解、绕过计费或伪造他人身份——只用自己的账号把自己的设备接上网。
+1. 把下载的文件重命名为 `esurfingdialer`，上传到路由器：
 
-## 快速开始
+   ```sh
+   scp esurfingdialer root@192.168.1.1:/tmp/esurfingdialer.new
+   ssh root@192.168.1.1
+   ```
+
+2. 首次安装时，把程序放到 `/usr/bin`：
+
+   ```sh
+   chmod 755 /tmp/esurfingdialer.new
+   cp /tmp/esurfingdialer.new /usr/bin/esurfingdialer
+   mkdir -p /etc/esurfingdialer
+   umask 077
+   vi /etc/esurfingdialer/wan.local.json
+   ```
+
+   已经在用旧版本的，请先备份二进制和配置，再安排停机更新，不要直接覆盖正在使用的程序。
+
+3. 在配置文件中填写账号、密码：
+
+   ```json
+   {
+     "user": "你的拨号账号",
+     "password": "你的拨号密码",
+     "log_level": "info",
+     "bind_interface": "eth1"
+   }
+   ```
+
+   `eth1` 是示例。用下面的命令查看 WAN 实际对应的设备名：
+
+   ```sh
+   ubus call network.interface.wan status | jsonfilter -e '@.l3_device'
+   ```
+
+4. 确认 WAN 已通过 DHCP 获得地址，再启动：
+
+   ```sh
+   chmod 600 /etc/esurfingdialer/wan.local.json
+   /usr/bin/esurfingdialer -c /etc/esurfingdialer/wan.local.json
+   ```
+
+   日志出现 `The login has been authorized.` 后，还要实际打开网页确认能上网。程序需要一直运行；停止时用 `Ctrl-C`。
+
+开机自启、多物理口和单线多拨的配置见[多拨教程](docs/multi-dial.md)。不要上传包含真实账号密码的配置文件或完整调试日志。
+
+## 可选配置
+
+完整示例在 [examples/config.json.example](examples/config.json.example)。常用字段如下：
+
+| 字段 | 什么时候用 |
+| --- | --- |
+| `bind_interface` | 指定出口设备，多出口时每个实例填自己的设备名 |
+| `bind_fwmark` | 按已有策略路由选出口，值需与路由器上的规则对应 |
+| `bind_source_ip` | 需要指定源地址时使用；DHCP 地址变化后要同步更新 |
+| `sms_code` | 登录需要短信验证码时填写 |
+| `portal_auto_login`、`portal_url` | 学校还有独立网页登录门户时使用，默认关闭 |
+| `portal_user`、`portal_password`、`portal_mac` | 独立门户的账号、密码和所用出口 MAC；门户账号可能与拨号账号不同 |
+
+不要仅因为网络慢就打开 `portal_auto_login`。先确认是否被重定向到校园门户，再填写对应参数。当前没有 `portal_host` 配置项。
+
+配置文件、环境变量、命令行参数都可使用，优先级是命令行 > 环境变量 > 配置文件。参数列表可运行 `esurfingdialer -h` 查看。多出口绑定功能仅在 Linux 上实现。
+
+## 自己编译
+
+需要 Go 1.24 或更新版本。
 
 ```sh
 git clone https://github.com/OneAsmallFish/esurfingdialer-go.git
 cd esurfingdialer-go
-
+go test ./...
 go build -trimpath -ldflags "-s -w" -o esurfingdialer ./cmd/esurfingdialer
-make release        # 或一次编出全部目标架构，产物在 dist/
-
-./esurfingdialer -u 账号 -p 密码
 ```
 
-成功时日志出现：
-
-```text
-[INFO] The login has been authorized.
-```
-
-之后进程自行保活，`SIGTERM` 会主动下线。参数总览见 `./esurfingdialer --help`。
-
-## 配置
-
-覆盖顺序：配置文件 → 环境变量 → 命令行参数。
-
-```json
-{
-  "user": "账号",
-  "password": "密码",
-  "log_level": "info",
-
-  "bind_interface": "eth1",
-  "bind_fwmark": "0x100",
-
-  "portal_url": "",
-  "portal_auto_login": false
-}
-```
-
-- `bind_interface` / `bind_fwmark` / `bind_source_ip`：多出口绑定，见多拨指南第 7 章。
-- `portal_host` 留空时使用内置默认值（与原实现一致），其他学校可在此覆盖，无需重新编译。
-- 代码里没有任何写死的账号或凭据。
-
-## 路由器多拨
-
-### 👉 [`docs/multi-dial.md`](docs/multi-dial.md)
-
-三种架构对比（多物理口 / macvlan 单线 / netns+veth）、从零实操、可直接抄的 UCI 配置、
-策略路由读法、排障矩阵与回滚步骤。[`deploy/openwrt/`](deploy/openwrt/) 里有配套的
-procd 服务、hotplug 与 macvlan 多拨管理器。
-
-最小路径：
+例如为 ARM64 路由器编译（在 Linux、macOS 或 Git Bash 中执行）：
 
 ```sh
-scp esurfingdialer root@192.168.1.1:/usr/bin/
-scp -r deploy/openwrt/* root@192.168.1.1:/
-ssh root@192.168.1.1
-vi /etc/esurfingdialer/wan.json      # 填账号
-/etc/init.d/esurfingdialer enable && /etc/init.d/esurfingdialer start
-logread -f -e esurfingdialer
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o esurfingdialer ./cmd/esurfingdialer
 ```
 
-## 兼容性
+Windows PowerShell 则先设置 `$env:CGO_ENABLED='0'`、`$env:GOOS='linux'`、`$env:GOARCH='arm64'`，再执行 `go build`。
 
-| 目标 | GOOS / GOARCH | 备注 |
-|---|---|---|
-| ARM64 软路由 | `linux/arm64` | 推荐 |
-| MT7621 / MT7628 | `linux/mipsle` + `GOMIPS=softfloat` | 硬浮点会 SIGILL |
-| 旧 MIPS | `linux/mips` + `GOMIPS=softfloat` | |
-| ARMv7 | `linux/arm` + `GOARM=7` | |
-| x86 / NAS | `linux/amd64` | |
-| Windows / macOS | `windows/amd64`、`darwin/*` | 仅本机调试 |
+维护者推送 `v*` 标签后，GitHub Actions 会运行测试、构建各平台文件并发布 Release。手动构建可用 `VERSION=v1.0.1 sh scripts/build-release.sh`，产物在 `dist/`。
 
-用 `uname -m` 和 `opkg print-architecture` 确认真实架构。
+## 许可
 
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| [docs/multi-dial.md](docs/multi-dial.md) | 路由器多拨完全指南 |
-| [docs/protocol.md](docs/protocol.md) | 认证链路、ZSM、Client-ID 生命周期、日志脱敏 |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | 客户端侧排障 |
-| [docs/faq.md](docs/faq.md) | 常见问题 |
-| [deploy/openwrt/README.md](deploy/openwrt/README.md) | OpenWrt 部署资产说明 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
-
-## 免责声明
-
-- 仅供 **学习网络协议与个人正常接入** 使用。
-- 必须使用 **自己有权使用的账号**，并遵守所在学校 / 运营商的网络规定与服务条款。
-  多拨等行为可能违反相关规定，风险自负。
-- 作者不对账号封禁、服务中断、设备损坏等后果负责。
-- 与任何电信运营商、设备厂商或官方客户端 **没有任何关联**，也未获其授权或认可。
-- 仓库不包含任何第三方客户端的分发内容。
-
-## 许可证
-
-[GNU General Public License v3.0](LICENSE)。
-
-Copyright (C) 2026 esurfingdialer contributors
-
-本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证（第 3 版或更新版本）
-条款重新发布和/或修改它。本程序基于“有用”的目的分发，但 **不提供任何担保**，
-甚至不包含适销性或特定用途适用性的默示担保。详情见 LICENSE。
+[GPL-3.0](LICENSE)。本项目不是官方客户端；请使用有权使用的账号，并遵守所在学校和运营商的接入规定。

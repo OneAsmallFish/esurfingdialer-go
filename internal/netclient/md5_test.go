@@ -12,7 +12,7 @@ import (
 )
 
 func TestMd5HexVsJava(t *testing.T) {
-	data, err := os.ReadFile("../../review/cross-validation/java-md5.out")
+	data, err := os.ReadFile("../testdata/cross-validation/java-md5.out")
 	if err != nil {
 		t.Fatalf("read java md5 output: %v", err)
 	}

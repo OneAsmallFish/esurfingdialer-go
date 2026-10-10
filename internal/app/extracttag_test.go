@@ -27,7 +27,7 @@ func parseSamples() []string {
 }
 
 func TestExtractTagVsJsoup(t *testing.T) {
-	data, err := os.ReadFile("../../review/cross-validation/java-parse.out")
+	data, err := os.ReadFile("../testdata/cross-validation/java-parse.out")
 	if err != nil {
 		t.Fatalf("read java parse output: %v", err)
 	}
